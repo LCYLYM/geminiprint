@@ -22,6 +22,31 @@ interface SavedCanvas {
   timestamp: number;
 }
 
+// --- Safe UI Helpers ---
+const safeConfirm = (message: string, defaultValue = true): boolean => {
+  if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+    try {
+      return window.confirm(message);
+    } catch (e) {
+      console.warn("window.confirm not available", e);
+      return defaultValue;
+    }
+  }
+  return defaultValue;
+};
+
+const safeAlert = (message: string) => {
+  if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+    try {
+      window.alert(message);
+    } catch (e) {
+      console.error(message);
+    }
+  } else {
+    console.error(message);
+  }
+};
+
 // --- Custom Cursor Component ---
 const CustomCursor = () => {
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -92,20 +117,6 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [historyList, setHistoryList] = useState<HistoryItem[]>([]);
 
-  const safeConfirm = (message: string, defaultValue: boolean = true) => {
-    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-      return window.confirm(message);
-    }
-    return defaultValue;
-  };
-
-  const safeAlert = (message: string) => {
-    if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-      window.alert(message);
-    } else {
-      console.error(message);
-    }
-  };
   // --- Persistence Logic (IndexedDB) ---
   
   // 1. Init Storage
@@ -194,15 +205,15 @@ export default function App() {
 
   const handleNewCanvas = async () => {
     if (images.length > 0) {
-      if (!safeConfirm("确定要新建画布吗？当前画布将自动保存到历史记录。", true)) {
-        return;
-      }
-      // Force save before switching
-      try {
-        await saveCurrentData(canvasId, images);
-      } catch (e) {
-        console.error("Save before new failed", e);
-      }
+        if (!safeConfirm("确定要新建画布吗？当前画布将自动保存到历史记录。")) {
+            return;
+        }
+        // Force save before switching
+        try {
+            await saveCurrentData(canvasId, images);
+        } catch (e) {
+            console.error("Save before new failed", e);
+        }
     }
     
     const newId = 'canvas-' + Date.now();
@@ -220,13 +231,14 @@ export default function App() {
 
   const handleOpenHistory = async () => {
       // Ensure current work is saved/updated in history list before opening
-        if (images.length > 0) {
+      if (images.length > 0) {
           try {
             await saveCurrentData(canvasId, images);
           } catch (e) {
-            console.error("Save before opening history failed", e);
+            console.error("Save before history failed", e);
+            // Proceed to open history even if save fails
           }
-        }
+      }
       setShowHistory(true);
   };
 
@@ -250,10 +262,10 @@ export default function App() {
             setShowHistory(false);
             await saveMetaToDB('morisot_last_canvas_id', data.id);
         } else {
-          // Handle corrupted/missing data in history
-          if (safeConfirm("该历史记录文件已丢失或损坏，是否移除？", true)) {
-            setHistoryList(prev => prev.filter(item => item.id !== id));
-          }
+            // Handle corrupted/missing data in history
+             if (safeConfirm("该历史记录文件已丢失或损坏，是否移除？")) {
+                 setHistoryList(prev => prev.filter(item => item.id !== id));
+             }
         }
       } catch (e) {
           console.error("Load Failed", e);
@@ -544,7 +556,7 @@ export default function App() {
 
     } catch (e) {
         console.error("Full canvas share failed", e);
-          safeAlert("生成分享图失败，请重试");
+        safeAlert("生成分享图失败，请重试");
     }
   };
 
