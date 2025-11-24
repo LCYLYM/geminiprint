@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Header } from './components/Header';
 import { ControlPanel } from './components/ControlPanel';
 import { Canvas } from './components/Canvas';
 import { CanvasImage, GenerationStatus } from './types';
 import { generateSingleImage, STYLE_MODIFIERS } from './services/geminiService';
 import { urlToBase64, fileToBase64 } from './utils/helpers';
+import { saveCanvasToDB, loadCanvasFromDB, saveMetaToDB, loadMetaFromDB } from './services/storage';
 import html2canvas from 'html2canvas';
 
 // --- Types for History ---
@@ -91,89 +92,154 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [historyList, setHistoryList] = useState<HistoryItem[]>([]);
 
-  // --- Persistence Logic ---
+  // --- Persistence Logic (IndexedDB) ---
+  
+  // 1. Init Storage
   useEffect(() => {
-    // Load history list on mount
-    try {
-        const stored = localStorage.getItem('morisot_history_index');
-        if (stored) {
-            setHistoryList(JSON.parse(stored));
+    const initStorage = async () => {
+      try {
+        const storedIndex = await loadMetaFromDB('morisot_history_index');
+        if (storedIndex) {
+            setHistoryList(storedIndex);
         }
         
-        // Try load default/last canvas
-        const lastId = localStorage.getItem('morisot_last_canvas_id');
+        const lastId = await loadMetaFromDB('morisot_last_canvas_id');
         if (lastId) {
-            const savedCanvas = localStorage.getItem(`morisot_canvas_${lastId}`);
+            const savedCanvas = await loadCanvasFromDB(lastId);
             if (savedCanvas) {
-                const data: SavedCanvas = JSON.parse(savedCanvas);
-                setCanvasId(data.id);
-                setImages(data.images);
+                setCanvasId(savedCanvas.id);
+                setImages(savedCanvas.images);
+            } else {
+                // If ID exists but no data, it means we had an empty canvas last time
+                setCanvasId(lastId);
+                setImages([]);
             }
         }
-    } catch (e) {
+      } catch (e) {
         console.error("Storage Init Error", e);
+      }
+    };
+    initStorage();
+  }, []);
+
+  // 2. Save History Index whenever it changes
+  useEffect(() => {
+    // Save even if empty (to allow clearing history if we implemented that)
+    saveMetaToDB('morisot_history_index', historyList).catch(console.error);
+  }, [historyList]);
+
+  // 3. Core Save Function
+  const saveCurrentData = useCallback(async (currentId: string, currentImages: CanvasImage[]) => {
+    // Only save if we have images
+    if (currentImages.length === 0) return;
+
+    try {
+        // Save heavy data
+        const data: SavedCanvas = {
+            id: currentId,
+            images: currentImages,
+            timestamp: Date.now()
+        };
+        await saveCanvasToDB(data);
+        await saveMetaToDB('morisot_last_canvas_id', currentId);
+
+        // Update History List State
+        setHistoryList(prev => {
+            const exists = prev.find(p => p.id === currentId);
+            // Use the first image's prompt as the name, or default
+            const firstPrompt = currentImages[0]?.prompt || "未命名画布";
+            const name = firstPrompt.length > 30 ? firstPrompt.substring(0, 30) + "..." : firstPrompt;
+            
+            const newItem: HistoryItem = { id: currentId, name, timestamp: Date.now() };
+            
+            if (exists) {
+                // Update name and timestamp
+                return prev.map(p => p.id === currentId ? newItem : p);
+            } else {
+                return [newItem, ...prev];
+            }
+        });
+    } catch (e) {
+        console.error("Save Failed:", e);
+        throw e; // Re-throw so caller knows it failed
     }
   }, []);
 
-  // Auto-save effect
+  // 4. Auto-save effect (Debounced)
   useEffect(() => {
     if (images.length === 0) return;
 
     const timer = setTimeout(() => {
-        try {
-            const data: SavedCanvas = {
-                id: canvasId,
-                images: images,
-                timestamp: Date.now()
-            };
-            localStorage.setItem(`morisot_canvas_${canvasId}`, JSON.stringify(data));
-            localStorage.setItem('morisot_last_canvas_id', canvasId);
-
-            // Update Index
-            setHistoryList(prev => {
-                const exists = prev.find(p => p.id === canvasId);
-                const name = images[0]?.prompt.substring(0, 20) || "Untitled Canvas";
-                const newItem: HistoryItem = { id: canvasId, name, timestamp: Date.now() };
-                
-                let newList;
-                if (exists) {
-                    newList = prev.map(p => p.id === canvasId ? { ...newItem, name: exists.name === "Untitled Canvas" ? name : exists.name } : p);
-                } else {
-                    newList = [newItem, ...prev];
-                }
-                localStorage.setItem('morisot_history_index', JSON.stringify(newList));
-                return newList;
-            });
-        } catch (e) {
-            console.error("Auto Save Failed", e);
-        }
+        saveCurrentData(canvasId, images).catch(e => console.error("Auto-save error", e));
     }, 1000); // Debounce 1s
 
     return () => clearTimeout(timer);
-  }, [images, canvasId]);
+  }, [images, canvasId, saveCurrentData]);
 
   // --- Actions ---
-  const handleNewCanvas = () => {
-    if (window.confirm("确定要新建画布吗？当前画布已自动保存。")) {
-        const newId = 'canvas-' + Date.now();
-        setCanvasId(newId);
-        setImages([]);
-        setSelectedId(null);
+
+  const handleNewCanvas = async () => {
+    if (images.length > 0) {
+        if (!window.confirm("确定要新建画布吗？当前画布将自动保存到历史记录。")) {
+            return;
+        }
+        // Force save before switching
+        try {
+            await saveCurrentData(canvasId, images);
+        } catch (e) {
+            console.error("Save before new failed", e);
+        }
     }
+    
+    const newId = 'canvas-' + Date.now();
+    
+    // Clear State first for immediate feedback
+    setImages([]);
+    setCanvasId(newId);
+    setSelectedId(null);
+    setZoomedImage(null);
+    setStatus(GenerationStatus.IDLE);
+
+    // Persist the new ID as the "last visited" so refresh works
+    saveMetaToDB('morisot_last_canvas_id', newId).catch(console.error);
   };
 
-  const handleLoadCanvas = (id: string) => {
+  const handleOpenHistory = async () => {
+      // Ensure current work is saved/updated in history list before opening
+      if (images.length > 0) {
+          await saveCurrentData(canvasId, images);
+      }
+      setShowHistory(true);
+  };
+
+  const handleLoadCanvas = async (id: string) => {
+      // Save current before loading new if valid
+      if (images.length > 0) {
+          try {
+             await saveCurrentData(canvasId, images);
+          } catch(e) {
+             console.error("Save before load failed", e);
+          }
+      }
+
       try {
-        const saved = localStorage.getItem(`morisot_canvas_${id}`);
-        if (saved) {
-            const data: SavedCanvas = JSON.parse(saved);
+        const data = await loadCanvasFromDB(id);
+        if (data) {
             setCanvasId(data.id);
             setImages(data.images);
             setSelectedId(null);
+            setZoomedImage(null);
             setShowHistory(false);
+            await saveMetaToDB('morisot_last_canvas_id', data.id);
+        } else {
+            // Handle corrupted/missing data in history
+             if (window.confirm("该历史记录文件已丢失或损坏，是否移除？")) {
+                 setHistoryList(prev => prev.filter(item => item.id !== id));
+             }
         }
       } catch (e) {
           console.error("Load Failed", e);
+          alert("读取历史记录失败");
       }
   };
 
@@ -287,6 +353,9 @@ export default function App() {
                 activeRequests--;
                 if (activeRequests === 0) {
                     setStatus(GenerationStatus.SUCCESS);
+                    // Force a save after generation completes to update history name if this was first gen
+                    // But we can't easily access current state here due to closure.
+                    // The auto-save effect will catch this change (images updated).
                 }
             });
     });
@@ -345,8 +414,7 @@ export default function App() {
         artArea.style.backgroundSize = '20px 20px';
         artArea.style.overflow = 'hidden';
 
-        // --- ADD SVG LINES TO SHARE ---
-        // We must manually reconstruct the SVG structure for the screenshot
+        // --- ADD SVG LINES TO SHARE (Fixed Visibility) ---
         const svgNS = "http://www.w3.org/2000/svg";
         const svg = document.createElementNS(svgNS, "svg");
         svg.style.position = "absolute";
@@ -360,7 +428,6 @@ export default function App() {
              if (img.parentId) {
                 const parent = images.find(p => p.id === img.parentId);
                 if (parent) {
-                    // Use same logic as Canvas.tsx but adjusted for the share container coordinates
                     const startX = (parent.x - minX + padding) + 140; 
                     const startY = (parent.y - minY + padding) + 150;
                     const endX = (img.x - minX + padding) + 140;
@@ -372,17 +439,16 @@ export default function App() {
                     const d = `M ${startX} ${startY} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY}`;
                     path.setAttribute("d", d);
                     path.setAttribute("stroke", "#57534e");
-                    path.setAttribute("stroke-width", "1");
-                    path.setAttribute("stroke-dasharray", "5,5");
+                    path.setAttribute("stroke-width", "3"); // Thicker for screenshot
+                    path.setAttribute("stroke-dasharray", "10,10");
                     path.setAttribute("fill", "none");
-                    path.setAttribute("opacity", "0.6");
+                    path.setAttribute("opacity", "0.8");
                     
                     svg.appendChild(path);
                 }
              }
         });
         artArea.appendChild(svg);
-        // -------------------------------
 
         images.forEach(img => {
             const el = document.createElement('div');
@@ -394,7 +460,8 @@ export default function App() {
             el.style.transformOrigin = 'center center';
             el.style.backgroundColor = 'white';
             el.style.padding = '12px';
-            el.style.boxShadow = '0 15px 30px rgba(0,0,0,0.2)';
+            el.style.boxShadow = '0 20px 40px rgba(0,0,0,0.3)';
+            el.style.zIndex = '10'; // Ensure images are above lines
             
             const imgEl = document.createElement('img');
             imgEl.src = img.url;
@@ -492,7 +559,7 @@ export default function App() {
           onShare={handleShare}
           onZoomImage={setZoomedImage}
           onNewCanvas={handleNewCanvas}
-          onHistory={() => setShowHistory(true)}
+          onHistory={handleOpenHistory}
         />
       </div>
 
