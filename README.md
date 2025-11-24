@@ -1,6 +1,5 @@
 <div align="center">
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
 
 # 生🐟の画图坊 · Geminiprint
 
@@ -150,4 +149,3 @@ npm run dev
 - ⏳ 支持简单的「标签 / 项目分组」，适合长期使用时按主题管理作品。
 - ⏳ 更丰富的导出模板（例如带 Prompt 详细说明的长图、故事板布局等）。
 
-如果你也对「用 AI 做可视化创作流程工具」感兴趣，欢迎在这个基础上继续折腾和扩展。
