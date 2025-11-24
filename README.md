@@ -1,20 +1,150 @@
 <div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
 
-# Run and deploy your AI Studio app
+# 生🐟の画图坊 · Geminiprint
 
-This contains everything you need to run your app locally.
+一个带点磁带未来主义（Cassette Futurism）味道的 AI 画板：
+你不是在「写提示词交作业」，而是在一块可以任意摆放的无限画布上，用生成图像当素材，不断地拼贴、二创、迭代，像真正的画师一样「看着画面做决定」。
 
-View your app in AI Studio: https://ai.studio/apps/drive/1UDFB6tCX0eLT6usPPoGseXarkNmX1GRX
+---
 
-## Run Locally
+## 设计初衷 & 心得
 
-**Prerequisites:**  Node.js
+- **从「一次性出成品」到「过程导向创作」**  
+  很多 AI 画图工具都鼓励用户一次性把提示词写到完美，然后点生成等答案。这个项目反过来：
+  - 鼓励用户先随便丢一个想法上来，
+  - 再在画布上挑一张、拉一张、基于其中一角继续做变化，
+  - 历史画板会把这些阶段性版本都记下来。
+- **让「画面关系」被看见**  
+  每一张新图都可以带有 `parentId`，在画布上通过「连线」显式展示出「这个版本是从哪张图衍生出来的」。
+  这有点像把 Prompt 迭代过程，从命令行变成了可视化的关系图谱。
+- **尊重创作现场的「随手感」**  
+  - 图像可以随手拖动、旋转、缩放；
+  - 参考图既可以是上传图片，也可以是画布上已有的某一张；
+  - 生成结果以 5 张并行的形式铺开，方便横向比较、挑选、继续走分支。
 
+---
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## 功能概览
+
+- 🎨 **无限画布排版**：拖拽、缩放、旋转每一张图像，像摆放实体照片一样自由布置。  
+- 🔁 **多分支迭代**：基于选中图片或上传图片进行二次生成，并用连线展示演化关系。  
+- 💾 **自动保存 & 历史画板**：
+  - 使用 IndexedDB 将画布及其元信息本地持久化；
+  - 自动保存当前画布；
+  - 支持在「历史画板」中一键切换不同阶段。  
+- 🖼️ **一键生成展览级分享长图**：
+  - 将画布上的所有作品重新排布，自动拼出一张带 Logo / 标题 / 统计信息的展览海报；
+  - 适合发朋友圈 / 社交媒体当作「一整期作品展」。
+- 🧠 **Gemini 图像生成**：
+  - 基于 `@google/genai` 调用 `gemini-2.5-flash-image`；
+  - 文本 + 可选参考图双模态输入；
+  - 通过一组风格修饰词（`STYLE_MODIFIERS`）增强多样性。
+
+---
+
+## 技术栈
+
+- **前端框架**：React 19
+- **构建工具**：Vite 6
+- **样式**：Tailwind CSS（通过 CDN 注入）
+- **AI 能力**：`@google/genai` · `gemini-2.5-flash-image`
+- **本地持久化**：原生 IndexedDB 封装（`services/storage.ts`）
+- **实用工具**：`html2canvas` 用于导出整板分享图
+
+目录大致结构：
+
+- `App.tsx`：应用入口，负责：
+  - 全局状态（画布、选中状态、生成状态）；
+  - IndexedDB 加载 / 保存逻辑；
+  - 新建画布、历史切换、整板分享等核心行为。
+- `components/Canvas.tsx`：画布交互层，处理拖拽、平移、缩放、连线渲染等。
+- `components/ImageCard.tsx`：单张图片卡片，包含旋转 / 缩放手柄、下载、放大查看等交互。
+- `components/ControlPanel.tsx`：底部控制面板，负责输入文本、上传参考图、触发生成。
+- `components/Header.tsx`：顶部 HUD 与装饰信息。
+- `services/geminiService.ts`：与 Gemini API 的调用封装。
+- `services/storage.ts`：IndexedDB 持久化封装。
+- `utils/helpers.ts`：`fileToBase64` / `urlToBase64` 等辅助函数。
+
+---
+
+## 一些实现笔记
+
+### 1. 历史与画布 ID 设计
+
+- 每个画布有一个独立 `id`，如 `canvas-<timestamp>`；
+- 历史列表并不冗余存整套图片，而是：
+  - `canvases` store 存完整画布数据（图片数组等）；
+  - `meta` store 里存历史索引和最近一次打开的画布 ID；
+- 打开应用时会：
+  1. 读出历史索引，填充「历史画板」列表；
+  2. 读出上次 `last_canvas_id`，自动恢复到离开前的画布。
+
+这种方式在本地就可以无缝做「多项目 / 多阶段」切换，不需要后端服务，也避免了 localStorage 的容量和结构限制。
+
+### 2. 自动保存与「新建 / 历史」的配合
+
+- 对 `images` 变化做了防抖自动保存（1 秒）：
+  - 用户正常拖动/生成时不需要关心手动存档；
+- 在点击「新建画布」或打开「历史画板」时，会优先尝试：
+  - 将当前画布强制保存到 IndexedDB；
+  - 再切换到新建或历史画布；
+- 历史条目的命名逻辑：
+  - 取画布第一张图片的 `prompt` 作为标题，超过 30 字符自动截断加 `...`；
+  - 避免硬编码标题，让每条历史更贴近当时的创作语境。
+
+### 3. 生成体验与多样性
+
+- 每次生成默认发起 **5 个并行请求**：
+  - 使用同一基础 prompt；
+  - 但会附加不同的 `STYLE_MODIFIERS` 做风格扰动（写实 / 概念设计 / 极简等）；
+- 如果有上传图或选择了画布中的一张作为参考：
+  - 会优先把它作为 `inlineData` 传给 Gemini；
+  - prompt 则更多扮演「偏移与引导」的角色；
+- 在画布布局上，这 5 张图会被自动「散开」到父节点附近，方便视觉上理解「这是同一个分支的几个走向」。
+
+---
+
+## 本地运行
+
+> 项目仍然是一个标准的 Vite + React 应用，只是默认 README 中跟 AI Studio 的那部分说明已经移除，以下是更贴近当前代码结构的运行方式说明。
+
+### 1. 环境准备
+
+- Node.js（建议 18+）
+- 一个可用的 Gemini API Key
+
+### 2. 安装依赖
+
+```bash path=null start=null
+npm install
+```
+
+### 3. 配置环境变量
+
+在项目根目录创建 `.env.local` 文件，写入：
+
+```bash path=null start=null
+GEMINI_API_KEY=你的_API_Key
+```
+
+Vite 配置会自动把 `GEMINI_API_KEY` 注入为 `process.env.API_KEY`，供 `@google/genai` 使用。
+
+### 4. 启动开发服务器
+
+```bash path=null start=null
+npm run dev
+```
+
+根据终端提示，在浏览器中打开本地地址（一般是 `http://localhost:3000`），即可开始在画布上创作。
+
+---
+
+## 后续计划
+
+一些可以继续打磨的方向：
+
+- ✅ 更稳定的新建 / 历史交互（当前已做过一轮修复与增强）。——没用md
+- ⏳ 为历史画板增加缩略图预览，而不仅仅是文字标题和时间戳。
+- ⏳ 支持简单的「标签 / 项目分组」，适合长期使用时按主题管理作品。
+- ⏳ 更丰富的导出模板（例如带 Prompt 详细说明的长图、故事板布局等）。
+
